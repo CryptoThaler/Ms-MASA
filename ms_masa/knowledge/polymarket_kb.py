@@ -265,7 +265,7 @@ class PolymarketKB:
             f"Structure: {cls.MARKET_STRUCTURE['hierarchy']}",
             f"Gamma API: {cls.APIS['gamma']['base']} (discovery, no auth)",
             f"CLOB API: {cls.APIS['clob']['base']} (books/trading, L0=public L1=auth)",
-            f"Orders: {', '.join(f'{k}={v.split(':')[0]}' for k,v in cls.ORDER_TYPES.items())}",
+            "Orders: " + ", ".join(k + "=" + v.split(":")[0] for k, v in cls.ORDER_TYPES.items()),
         ]
 
         pattern = cls.AGENT_PATTERNS.get(agent_type, cls.AGENT_PATTERNS["read_only_agent"])

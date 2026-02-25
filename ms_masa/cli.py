@@ -87,6 +87,18 @@ def main(argv: list[str] | None = None):
     # templates
     sub.add_parser("templates", help="List agent templates")
 
+    # serve (MCP server)
+    p = sub.add_parser("serve", help="Start MCP server for agent integration")
+    p.add_argument("--list-tools", action="store_true", help="List MCP tools and exit")
+
+    # marketplace
+    p = sub.add_parser("marketplace", help="Marketplace integration tools")
+    p.add_argument("action", nargs="?", default="advertise",
+                    help="Action: advertise, a2a-card, mcp-config, olas-config, nft-metadata, install-guide, pricing")
+
+    # install-guide
+    sub.add_parser("install-guide", help="Show installation guide for all platforms")
+
     args = parser.parse_args(argv)
 
     if not args.command:
@@ -163,6 +175,49 @@ def main(argv: list[str] | None = None):
         from ms_masa.builder.templates import AgentTemplates
         for name, desc in AgentTemplates.list_templates().items():
             print(f"  {name}: {desc}")
+
+    elif args.command == "serve":
+        from ms_masa.mcp_server import main as mcp_main, TOOLS
+        if args.list_tools:
+            print(json.dumps(TOOLS, indent=2))
+        else:
+            print("Starting Ms-MASA MCP server (stdio)...", file=__import__("sys").stderr)
+            mcp_main()
+
+    elif args.command == "marketplace":
+        from ms_masa.marketplace import MarketplaceAdapter, MANIFEST, SKILL_NFT_TEMPLATES, INSTALLATION_GUIDE
+        adapter = MarketplaceAdapter()
+        action = args.action
+
+        if action == "advertise":
+            print(json.dumps(adapter.advertise(), indent=2))
+        elif action == "a2a-card":
+            print(json.dumps(MANIFEST.to_a2a_agent_card(), indent=2))
+        elif action == "mcp-config":
+            print(json.dumps(MANIFEST.to_mcp_manifest(), indent=2))
+        elif action == "olas-config":
+            print(json.dumps(MANIFEST.to_olas_registry(), indent=2))
+        elif action == "nft-metadata":
+            for name, nft in SKILL_NFT_TEMPLATES.items():
+                print(f"\n--- {name} ---")
+                print(json.dumps(nft.to_erc721_metadata(), indent=2))
+        elif action == "install-guide":
+            for key, guide in INSTALLATION_GUIDE.items():
+                print(f"\n  {guide['title']}")
+                for step in guide["steps"]:
+                    print(f"    {step}")
+        elif action == "pricing":
+            print(json.dumps(MANIFEST.pricing_summary(), indent=2))
+        else:
+            print(f"Unknown action: {action}")
+
+    elif args.command == "install-guide":
+        from ms_masa.marketplace import INSTALLATION_GUIDE
+        for key, guide in INSTALLATION_GUIDE.items():
+            print(f"\n  {guide['title']}")
+            for step in guide["steps"]:
+                print(f"    {step}")
+        print()
 
 
 if __name__ == "__main__":
