@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "ms-masa": {
+      "command": "python",
+      "args": ["-m", "ms_masa.mcp_server"]
+    }
+  }
+}
