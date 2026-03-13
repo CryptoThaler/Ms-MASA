@@ -125,7 +125,7 @@ def callable_tools() -> dict[str, Callable]:
 
     return {
         "polymarket_explain": explain,
-        "polymarket_reference": reference_card,
+        "polymarket_reference_card": reference_card,
         "polymarket_agent_context": agent_context,
         "polymarket_scan_markets": scan_markets,
         "polymarket_search_markets": search_markets,
@@ -133,7 +133,7 @@ def callable_tools() -> dict[str, Callable]:
         "polymarket_order_book": order_book,
         "polymarket_detect_signals": detect_signals,
         "polymarket_build_agent": build_agent,
-        "polymarket_ecosystem": ecosystem,
+        "polymarket_ecosystem_reference": ecosystem,
     }
 
 

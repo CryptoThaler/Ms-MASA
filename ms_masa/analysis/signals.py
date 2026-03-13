@@ -128,4 +128,46 @@ class SignalEngine:
                 metadata={"yes_price": yes_p},
             ))
 
+        # Price momentum signal (requires price_change_24h from snapshot)
+        if snapshot.price_change_24h != 0.0:
+            change = snapshot.price_change_24h
+            abs_change = abs(change)
+            if abs_change > 0.05:
+                direction = "up" if change > 0 else "down"
+                signals.append(MarketSignal(
+                    market_id=market.id,
+                    signal_type="price_momentum",
+                    strength=min(abs_change / 0.2, 1.0) * (1 if change > 0 else -1),
+                    description=f"Price momentum {direction} {abs_change:.4f} in 24h",
+                    metadata={"price_change_24h": change, "direction": direction},
+                ))
+
+        # Volume spike signal (requires volume_24h from snapshot)
+        if snapshot.volume_24h > 0 and market.volume > 0:
+            vol_ratio = snapshot.volume_24h / max(market.volume, 1.0)
+            if vol_ratio > 0.1:  # >10% of total volume in 24h
+                signals.append(MarketSignal(
+                    market_id=market.id,
+                    signal_type="volume_spike",
+                    strength=min(vol_ratio, 1.0),
+                    description=f"Volume spike: 24h volume is {vol_ratio:.1%} of total",
+                    metadata={"volume_24h": snapshot.volume_24h, "total_volume": market.volume},
+                ))
+
+        # Uncertainty shift signal (moving toward or away from 50%)
+        if snapshot.price_change_24h != 0.0:
+            prev_p = yes_p - snapshot.price_change_24h
+            prev_uncertainty = 1.0 - abs(prev_p - 0.5) * 2
+            curr_uncertainty = 1.0 - abs(yes_p - 0.5) * 2
+            shift = curr_uncertainty - prev_uncertainty
+            if abs(shift) > 0.05:
+                direction = "increasing" if shift > 0 else "decreasing"
+                signals.append(MarketSignal(
+                    market_id=market.id,
+                    signal_type="uncertainty_shift",
+                    strength=min(abs(shift), 1.0) * (1 if shift > 0 else -1),
+                    description=f"Uncertainty {direction} by {abs(shift):.4f}",
+                    metadata={"shift": shift, "direction": direction},
+                ))
+
         return signals

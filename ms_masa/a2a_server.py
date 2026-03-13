@@ -126,15 +126,21 @@ AGENT_CARD = {
 
 def route_task(message: str) -> dict[str, Any]:
     """Route an incoming A2A task to the appropriate Ms-MASA skill."""
+    if not message or not message.strip():
+        return {"skill": "error", "data": {"error": "Empty message"}}
+
     from ms_masa.agent import MsMasaAgent
     agent = MsMasaAgent.from_env()
 
-    msg = message.lower()
+    # Sanitize: strip control chars, limit length
+    msg = message.strip()[:2000].lower()
 
     # Knowledge queries
     knowledge_triggers = {
         "how does polymarket": "platform",
         "what is polymarket": "platform",
+        "explain": "platform",
+        "what are the": "platform",
         "clob": "clob",
         "gamma": "gamma",
         "order": "orders",
@@ -143,8 +149,13 @@ def route_task(message: str) -> dict[str, Any]:
         "contract": "contracts",
         "resolution": "resolution",
         "neg.risk": "neg_risk",
+        "neg risk": "neg_risk",
         "websocket": "websocket",
         "fee": "fees",
+        "pricing": "fees",
+        "token": "market_structure",
+        "market structure": "market_structure",
+        "pattern": "patterns",
     }
     for trigger, topic in knowledge_triggers.items():
         if trigger in msg:
@@ -189,7 +200,7 @@ def route_task(message: str) -> dict[str, Any]:
     # Agent building
     if any(w in msg for w in ["build", "generate", "create", "template", "scaffold"]):
         template = "market_monitor"
-        for t in ["signal_scanner", "data_collector", "llm_analyst"]:
+        for t in ["signal_scanner", "data_collector", "llm_analyst", "autonomous_loop"]:
             if t.replace("_", " ") in msg or t in msg:
                 template = t
                 break

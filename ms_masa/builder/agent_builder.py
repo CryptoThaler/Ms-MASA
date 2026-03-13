@@ -54,6 +54,7 @@ class AgentBuilder:
             "signal_scanner": self.templates.signal_scanner,
             "data_collector": self.templates.data_collector,
             "llm_analyst": self.templates.llm_analyst,
+            "autonomous_loop": self.templates.autonomous_loop,
         }
 
         gen_fn = template_map.get(template)
