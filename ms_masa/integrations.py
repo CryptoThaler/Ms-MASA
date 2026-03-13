@@ -25,7 +25,7 @@ Usage:
 from __future__ import annotations
 
 import json
-from typing import Any, Callable
+from typing import Callable
 
 from ms_masa.agent import MsMasaAgent
 from ms_masa.skill_manifest import MANIFEST

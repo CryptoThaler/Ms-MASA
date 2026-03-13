@@ -1,0 +1,11 @@
+name: ms-masa
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python>=3.9
+  - pip
+  - pip:
+    - httpx>=0.24.0
+    - pytest
+    - flake8

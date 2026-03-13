@@ -114,7 +114,7 @@ def create_agent(seed: str = "ms-masa-polymarket-agent", port: int = 8001):
     @agent.on_event("startup")
     async def startup(ctx: Context):
         ctx.logger.info(f"Ms-MASA uAgent started: {ctx.agent.address}")
-        ctx.logger.info(f"Skills: knowledge, scan, search, analyze, signals")
+        ctx.logger.info("Skills: knowledge, scan, search, analyze, signals")
 
     @agent.on_message(model=KnowledgeQuery)
     async def handle_knowledge(ctx: Context, sender: str, msg: KnowledgeQuery):

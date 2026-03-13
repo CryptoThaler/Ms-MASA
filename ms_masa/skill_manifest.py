@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any  # noqa: F401 - used by dataclass field type hints
 
 
 # ── Pricing Tiers ──────────────────────────────────────────────────────
@@ -325,7 +325,7 @@ class AgentManifest:
         from reusable components.
         """
         return {
-            "name": f"ms_masa_polymarket_service",
+            "name": "ms_masa_polymarket_service",
             "description": self.description,
             "version": self.version,
             "license": self.license,

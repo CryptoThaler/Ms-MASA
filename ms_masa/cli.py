@@ -156,7 +156,7 @@ def main(argv: list[str] | None = None):
 
     elif args.command == "build":
         builder = AgentBuilder(output_dir=args.dir)
-        code = builder.generate(args.template, output_file=args.output)
+        builder.generate(args.template, output_file=args.output)
         print(f"Generated {args.template} agent in {args.dir}/")
 
     elif args.command == "scaffold":

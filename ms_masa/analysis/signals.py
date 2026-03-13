@@ -8,9 +8,7 @@ use for decision-making. All signals are informational/analytical only.
 from __future__ import annotations
 
 import logging
-from typing import Optional
-
-from ms_masa.models import MarketSignal, MarketSnapshot, OrderBook
+from ms_masa.models import MarketSignal, MarketSnapshot
 
 logger = logging.getLogger(__name__)
 
