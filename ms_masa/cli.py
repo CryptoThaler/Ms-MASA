@@ -102,10 +102,24 @@ def main(argv: list[str] | None = None):
     # install-guide
     sub.add_parser("install-guide", help="Show installation guide for all platforms")
 
+    # dashboard
+    p = sub.add_parser("dashboard", help="Start the web dashboard")
+    p.add_argument("--host", help="Bind address (default: 127.0.0.1)")
+    p.add_argument("--port", type=int, help="Port (default: 8050)")
+    p.add_argument("--sample-data", action="store_true", help="Use fictional sample markets (offline)")
+    p.add_argument("--open", action="store_true", help="Open in a browser")
+
     args = parser.parse_args(argv)
 
     if not args.command:
         parser.print_help()
+        return
+
+    if args.command == "dashboard":
+        from ms_masa.dashboard.server import main as dashboard_main
+        dash_args = (["--host", args.host] if args.host else []) + (["--port", str(args.port)] if args.port else [])
+        dash_args += ["--sample-data"] * args.sample_data + ["--open"] * args.open
+        dashboard_main(dash_args)
         return
 
     agent = MsMasaAgent.from_env()

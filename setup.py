@@ -10,7 +10,8 @@ setup(
     long_description_content_type="text/markdown",
     author="Ms-MASA",
     license="MIT",
-    packages=find_packages(),
+    packages=find_packages(exclude=["tests"]),
+    package_data={"ms_masa.dashboard": ["static/*"]},
     python_requires=">=3.9",
     install_requires=[
         "httpx>=0.24.0",
@@ -32,6 +33,7 @@ setup(
             "ms-masa=ms_masa.cli:main",
             "ms-masa-mcp=ms_masa.mcp_server:serve",
             "ms-masa-marketplace=ms_masa.marketplace:main",
+            "ms-masa-dashboard=ms_masa.dashboard.server:main",
         ],
     },
     classifiers=[

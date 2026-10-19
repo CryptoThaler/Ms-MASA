@@ -1,0 +1,1 @@
+"""Ms-MASA web dashboard."""

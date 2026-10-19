@@ -464,6 +464,16 @@ INSTALLATION_GUIDE = {
             "4. Other A2A agents discover Ms-MASA via agent card URL",
         ],
     },
+    "web_dashboard": {
+        "title": "Run the Web Dashboard",
+        "steps": [
+            "1. pip install ms-masa",
+            "2. ms-masa dashboard --open                 # live Polymarket data",
+            "   ms-masa dashboard --sample-data --open   # offline, fictional sample markets",
+            "3. Browse http://127.0.0.1:8050/ (markets, signals, order book depth, knowledge)",
+            "4. Sharing on a network: set MS_MASA_AUTH_TOKEN and add --host 0.0.0.0",
+        ],
+    },
     "direct_python": {
         "title": "Direct Python Import",
         "steps": [
