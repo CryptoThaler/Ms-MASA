@@ -22,6 +22,10 @@ setup(
             "openai>=1.0.0",
             "py-clob-client",
         ],
+        "server": [
+            "mcp[cli]>=1.30,<2",
+            "uvicorn>=0.30",
+        ],
     },
     entry_points={
         "console_scripts": [

@@ -118,10 +118,9 @@ def callable_tools() -> dict[str, Callable]:
 
     def ecosystem(section: str = "summary") -> str:
         """Get Polymarket developer ecosystem reference."""
-        from ms_masa.knowledge.ecosystem import EcosystemReference as eco
-        if section == "summary":
-            return eco.summary()
-        return json.dumps(getattr(eco, section.upper(), {}), indent=2, default=str)
+        from ms_masa.mcp_server import ecosystem_section
+        data = ecosystem_section(section)
+        return data if isinstance(data, str) else json.dumps(data, indent=2, default=str)
 
     return {
         "polymarket_explain": explain,
@@ -284,7 +283,15 @@ def execute_openai_function(name: str, arguments: dict) -> str:
     func = tools.get(name)
     if func is None:
         return json.dumps({"error": f"Unknown function: {name}"})
+    import inspect
+    if not isinstance(arguments, dict):
+        return json.dumps({"error": "arguments must be an object"})
+    try:
+        inspect.signature(func).bind(**arguments)
+    except TypeError:
+        return json.dumps({"error": f"Invalid arguments for {name}"})
     try:
         return func(**arguments)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        from ms_masa.security import public_error
+        return json.dumps({"error": public_error(e, f"function {name}")})

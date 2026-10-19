@@ -253,6 +253,24 @@ def _get_ecosystem():
     return EcosystemReference
 
 
+ECOSYSTEM_SECTIONS = (
+    "repos", "websocket", "fees", "resolution", "neg_risk",
+    "clob_endpoints", "order_structure", "subgraphs", "agent_prompts",
+)
+
+
+def ecosystem_section(section: str) -> Any:
+    """Return an ecosystem section by allowlisted name."""
+    eco = _get_ecosystem()
+    if section == "summary":
+        return eco.summary()
+    if section == "all":
+        return {s: getattr(eco, s.upper(), None) for s in ECOSYSTEM_SECTIONS}
+    if section in ECOSYSTEM_SECTIONS:
+        return getattr(eco, section.upper(), None)
+    return {"error": f"Unknown section: {section}", "available": [*ECOSYSTEM_SECTIONS, "summary", "all"]}
+
+
 def execute_tool(name: str, arguments: dict[str, Any]) -> Any:
     """Execute an MCP tool and return the result."""
     agent = _get_agent()
@@ -297,22 +315,7 @@ def execute_tool(name: str, arguments: dict[str, Any]) -> Any:
         )
 
     elif name == "polymarket_ecosystem":
-        eco = _get_ecosystem()
-        section = arguments.get("section", "summary")
-        if section == "summary":
-            return eco.summary()
-        elif section == "all":
-            return {
-                "repos": eco.REPOS,
-                "websocket": eco.WEBSOCKET,
-                "fees": eco.FEES,
-                "resolution": eco.RESOLUTION,
-                "neg_risk": eco.NEG_RISK,
-                "order_structure": eco.ORDER_STRUCTURE,
-                "subgraphs": eco.SUBGRAPHS,
-            }
-        else:
-            return getattr(eco, section.upper(), f"Unknown section: {section}")
+        return ecosystem_section(arguments.get("section", "summary"))
 
     elif name == "polymarket_build_agent":
         from ms_masa.builder.agent_builder import AgentBuilder
@@ -380,8 +383,9 @@ def handle_message(msg: dict) -> dict | None:
                 "isError": False,
             })
         except Exception as e:
+            from ms_masa.security import public_error
             return _result(msg_id, {
-                "content": [{"type": "text", "text": f"Error: {e}"}],
+                "content": [{"type": "text", "text": public_error(e, f"tool {tool_name}")}],
                 "isError": True,
             })
 
@@ -395,8 +399,11 @@ def handle_message(msg: dict) -> dict | None:
             return _result(msg_id, {
                 "contents": [{"uri": uri, "mimeType": mime, "text": content}],
             })
+        except ValueError:
+            return _error(msg_id, -32602, f"Unknown resource: {uri}")
         except Exception as e:
-            return _error(msg_id, -32602, str(e))
+            from ms_masa.security import public_error
+            return _error(msg_id, -32603, public_error(e, f"resource {uri}"))
 
     elif method == "ping":
         return _result(msg_id, {})
@@ -415,52 +422,77 @@ def _error(msg_id: Any, code: int, message: str) -> dict:
 
 # ── Transport: stdio ───────────────────────────────────────────────────
 
-def run_stdio():
-    """Run MCP server over stdio (stdin/stdout JSON-RPC)."""
-    import io
+MAX_MESSAGE_BYTES = 4 * 1024 * 1024
+MAX_HEADER_LINE_BYTES = 1024
 
-    # Use binary mode for Content-Length framing
-    stdin = sys.stdin.buffer if hasattr(sys.stdin, "buffer") else sys.stdin
-    stdout = sys.stdout.buffer if hasattr(sys.stdout, "buffer") else sys.stdout
+
+def _write_message(stdout, response: dict) -> None:
+    resp_bytes = json.dumps(response).encode("utf-8")
+    stdout.write(f"Content-Length: {len(resp_bytes)}\r\n\r\n".encode("utf-8"))
+    stdout.write(resp_bytes)
+    stdout.flush()
+
+
+def run_stdio():
+    """Run MCP server over stdio (Content-Length framed JSON-RPC)."""
+    import logging
+    log = logging.getLogger("ms_masa.mcp")
+
+    stdin = sys.stdin.buffer
+    stdout = sys.stdout.buffer
 
     while True:
         try:
-            # Read Content-Length header
             headers = {}
             while True:
-                line = stdin.readline()
+                line = stdin.readline(MAX_HEADER_LINE_BYTES)
                 if not line:
                     return  # EOF
-                line_str = line.decode("utf-8") if isinstance(line, bytes) else line
-                line_str = line_str.strip()
+                line_str = line.decode("utf-8", errors="replace").strip()
                 if not line_str:
                     break
                 if ":" in line_str:
                     key, val = line_str.split(":", 1)
                     headers[key.strip().lower()] = val.strip()
 
-            content_length = int(headers.get("content-length", 0))
-            if content_length == 0:
+            try:
+                content_length = int(headers.get("content-length", "0"))
+            except ValueError:
+                log.warning("Invalid Content-Length header: %r", headers.get("content-length"))
+                continue
+            if content_length <= 0:
+                continue
+            if content_length > MAX_MESSAGE_BYTES:
+                # Discard the oversized body in chunks so framing stays in sync.
+                log.warning("Dropping %d-byte message (limit %d)", content_length, MAX_MESSAGE_BYTES)
+                remaining = content_length
+                while remaining > 0:
+                    chunk = stdin.read(min(remaining, 65536))
+                    if not chunk:
+                        return
+                    remaining -= len(chunk)
+                _write_message(stdout, _error(None, -32600, "Message too large"))
                 continue
 
             body = stdin.read(content_length)
-            body_str = body.decode("utf-8") if isinstance(body, bytes) else body
-            msg = json.loads(body_str)
+            try:
+                msg = json.loads(body.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                log.warning("Unparseable message: %s", e)
+                _write_message(stdout, _error(None, -32700, "Parse error"))
+                continue
+            if not isinstance(msg, dict):
+                _write_message(stdout, _error(None, -32600, "Invalid request"))
+                continue
 
             response = handle_message(msg)
             if response is not None:
-                resp_bytes = json.dumps(response).encode("utf-8")
-                header = f"Content-Length: {len(resp_bytes)}\r\n\r\n"
-                header_bytes = header.encode("utf-8")
-                if isinstance(stdout, io.RawIOBase) or hasattr(stdout, "write"):
-                    stdout.write(header_bytes)
-                    stdout.write(resp_bytes)
-                    stdout.flush()
+                _write_message(stdout, response)
 
-        except (json.JSONDecodeError, KeyError, ValueError):
-            continue
         except (EOFError, BrokenPipeError):
             break
+        except Exception:
+            log.exception("Unexpected error in MCP stdio loop")
 
 
 # ── Entry Point ────────────────────────────────────────────────────────
@@ -485,10 +517,11 @@ def main():
         return
 
     if args.sse:
-        print(f"SSE transport on port {args.sse} (requires mcp[sse] package)", file=sys.stderr)
-        print("For now, use stdio transport (default).", file=sys.stderr)
+        print("SSE transport is provided by ms_masa.mcp_server_v2 (--sse PORT).", file=sys.stderr)
         sys.exit(1)
 
+    import logging
+    logging.basicConfig(level=logging.INFO, stream=sys.stderr)
     run_stdio()
 
 

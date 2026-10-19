@@ -9,8 +9,10 @@ Install:
     pip install "a2a-sdk[all]"
 
 Run:
-    python -m ms_masa.a2a_server                    # port 9999
+    python -m ms_masa.a2a_server                    # 127.0.0.1:9999, no auth
     python -m ms_masa.a2a_server --port 8080        # custom port
+    MS_MASA_AUTH_TOKEN=... python -m ms_masa.a2a_server --host 0.0.0.0
+                                                    # remote: bearer token required
 
 Discovery:
     curl http://localhost:9999/.well-known/agent.json
@@ -21,6 +23,7 @@ Protocol: https://a2a-protocol.org/latest/specification/
 from __future__ import annotations
 
 import json
+import os
 import sys
 from typing import Any
 
@@ -210,126 +213,173 @@ def route_task(message: str) -> dict[str, Any]:
 
 # ── Minimal HTTP Server (stdlib, no dependencies) ─────────────────────
 
-def run_http_server(port: int = 9999):
-    """Run a minimal A2A-compatible HTTP server using only stdlib."""
-    from http.server import HTTPServer, BaseHTTPRequestHandler
-    import uuid
+MAX_BODY_BYTES = 1_048_576
+MAX_TASKS = 1000
+MAX_TASK_ID_LENGTH = 128
+REQUEST_TIMEOUT_SECONDS = 30
 
-    # In-memory task store
-    tasks: dict[str, dict] = {}
+
+class BoundedTaskStore:
+    """FIFO-evicting task store so memory stays bounded under load."""
+
+    def __init__(self, max_tasks: int = MAX_TASKS):
+        from collections import OrderedDict
+        import threading
+        self._tasks: OrderedDict[str, dict] = OrderedDict()
+        self._max = max_tasks
+        self._lock = threading.Lock()
+
+    def put(self, task_id: str, task: dict) -> None:
+        with self._lock:
+            self._tasks.pop(task_id, None)
+            self._tasks[task_id] = task
+            while len(self._tasks) > self._max:
+                self._tasks.popitem(last=False)
+
+    def get(self, task_id: str) -> dict | None:
+        with self._lock:
+            return self._tasks.get(task_id)
+
+    def __len__(self) -> int:
+        return len(self._tasks)
+
+
+def build_agent_card(host: str, port: int, auth_required: bool) -> dict:
+    card = dict(AGENT_CARD)
+    display_host = "localhost" if host in ("127.0.0.1", "::1") else host
+    card["url"] = f"http://{display_host}:{port}/"
+    card["authentication"] = {"schemes": ["bearer"] if auth_required else ["none"]}
+    return card
+
+
+def _jsonrpc_error(msg_id: Any, code: int, message: str) -> dict:
+    return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}}
+
+
+def handle_jsonrpc(msg: Any, tasks: BoundedTaskStore) -> dict:
+    """Dispatch one A2A JSON-RPC request. Never exposes internal error text."""
+    import uuid
+    from ms_masa.security import public_error
+
+    if not isinstance(msg, dict):
+        return _jsonrpc_error(None, -32600, "Invalid request")
+
+    method = msg.get("method", "")
+    msg_id = msg.get("id")
+    params = msg.get("params") or {}
+    if not isinstance(params, dict):
+        return _jsonrpc_error(msg_id, -32602, "params must be an object")
+
+    task_id = params.get("id")
+    if task_id is not None and (not isinstance(task_id, str) or len(task_id) > MAX_TASK_ID_LENGTH):
+        return _jsonrpc_error(msg_id, -32602, f"id must be a string of at most {MAX_TASK_ID_LENGTH} chars")
+
+    if method == "tasks/send":
+        task_id = task_id or str(uuid.uuid4())
+        message = params.get("message")
+        parts = message.get("parts", []) if isinstance(message, dict) else []
+        user_text = "".join(
+            p.get("text", "") for p in parts
+            if isinstance(p, dict) and p.get("type") == "text" and isinstance(p.get("text"), str)
+        )
+        if not user_text:
+            return _jsonrpc_error(msg_id, -32602, "message.parts must contain a text part")
+
+        try:
+            result = route_task(user_text)
+            data = result.get("data", result)
+            text_output = data if isinstance(data, str) else json.dumps(data, indent=2, default=str)
+            task = {
+                "id": task_id,
+                "status": {"state": "completed"},
+                "artifacts": [{"parts": [{"type": "text", "text": text_output}]}],
+            }
+        except Exception as e:
+            task = {
+                "id": task_id,
+                "status": {"state": "failed", "message": public_error(e, "a2a task")},
+            }
+        tasks.put(task_id, task)
+        return {"jsonrpc": "2.0", "id": msg_id, "result": task}
+
+    if method == "tasks/get":
+        task = tasks.get(task_id or "")
+        if task:
+            return {"jsonrpc": "2.0", "id": msg_id, "result": task}
+        return _jsonrpc_error(msg_id, -32602, "Task not found")
+
+    return _jsonrpc_error(msg_id, -32601, "Method not found")
+
+
+def run_http_server(port: int = 9999, host: str | None = None):
+    """Run a minimal A2A-compatible HTTP server using only stdlib."""
+    from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+    from ms_masa.security import DEFAULT_HOST, bearer_matches, enforce_bind_policy, load_auth_token
+
+    host = host or DEFAULT_HOST
+    token = load_auth_token()
+    enforce_bind_policy(host, token)
+
+    tasks = BoundedTaskStore()
+    card_body = json.dumps(build_agent_card(host, port, token is not None), indent=2).encode()
 
     class A2AHandler(BaseHTTPRequestHandler):
+        timeout = REQUEST_TIMEOUT_SECONDS
+
+        def _send_json(self, status: int, payload: bytes, extra_headers: dict | None = None):
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            for k, v in (extra_headers or {}).items():
+                self.send_header(k, v)
+            self.end_headers()
+            self.wfile.write(payload)
+
         def do_GET(self):
+            # Agent card stays public so other agents can discover auth requirements.
             if self.path == "/.well-known/agent.json":
-                card = AGENT_CARD.copy()
-                card["url"] = f"http://localhost:{port}/"
-                body = json.dumps(card, indent=2).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                self._send_json(200, card_body)
             else:
-                self.send_error(404)
+                self._send_json(404, b'{"error":"not found"}')
 
         def do_POST(self):
-            content_length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(content_length)
-
-            try:
-                msg = json.loads(body)
-            except json.JSONDecodeError:
-                self.send_error(400, "Invalid JSON")
+            if not bearer_matches(self.headers.get("Authorization"), token):
+                self._send_json(401, b'{"error":"unauthorized"}', {"WWW-Authenticate": "Bearer"})
                 return
 
-            method = msg.get("method", "")
-            msg_id = msg.get("id")
-            params = msg.get("params", {})
+            try:
+                content_length = int(self.headers.get("Content-Length", ""))
+            except ValueError:
+                self._send_json(411, b'{"error":"Content-Length required"}')
+                return
+            if content_length < 0 or content_length > MAX_BODY_BYTES:
+                self.close_connection = True
+                self._send_json(413, b'{"error":"request body too large"}')
+                return
 
-            if method == "tasks/send":
-                # Extract the user message
-                message_parts = params.get("message", {}).get("parts", [])
-                user_text = ""
-                for part in message_parts:
-                    if part.get("type") == "text":
-                        user_text += part.get("text", "")
+            try:
+                msg = json.loads(self.rfile.read(content_length))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                self._send_json(200, json.dumps(_jsonrpc_error(None, -32700, "Parse error")).encode())
+                return
 
-                if not user_text:
-                    user_text = str(params.get("message", ""))
-
-                # Execute the task
-                try:
-                    result = route_task(user_text)
-                    data = result.get("data", result)
-                    text_output = (
-                        data if isinstance(data, str)
-                        else json.dumps(data, indent=2, default=str)
-                    )
-
-                    task_id = params.get("id", str(uuid.uuid4()))
-                    task = {
-                        "id": task_id,
-                        "status": {"state": "completed"},
-                        "artifacts": [{
-                            "parts": [{"type": "text", "text": text_output}],
-                        }],
-                    }
-                    tasks[task_id] = task
-
-                    response = {
-                        "jsonrpc": "2.0",
-                        "id": msg_id,
-                        "result": task,
-                    }
-                except Exception as e:
-                    response = {
-                        "jsonrpc": "2.0",
-                        "id": msg_id,
-                        "result": {
-                            "id": params.get("id", str(uuid.uuid4())),
-                            "status": {"state": "failed", "message": str(e)},
-                        },
-                    }
-
-            elif method == "tasks/get":
-                task_id = params.get("id", "")
-                task = tasks.get(task_id)
-                if task:
-                    response = {"jsonrpc": "2.0", "id": msg_id, "result": task}
-                else:
-                    response = {
-                        "jsonrpc": "2.0",
-                        "id": msg_id,
-                        "error": {"code": -32602, "message": f"Task not found: {task_id}"},
-                    }
-
-            else:
-                response = {
-                    "jsonrpc": "2.0",
-                    "id": msg_id,
-                    "error": {"code": -32601, "message": f"Method not found: {method}"},
-                }
-
-            resp_body = json.dumps(response).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(resp_body)))
-            self.end_headers()
-            self.wfile.write(resp_body)
+            response = handle_jsonrpc(msg, tasks)
+            self._send_json(200, json.dumps(response).encode())
 
         def log_message(self, format, *args):
-            # Suppress access logs for cleaner output
             pass
 
-    server = HTTPServer(("0.0.0.0", port), A2AHandler)
-    print(f"Ms-MASA A2A server running on http://localhost:{port}/", file=sys.stderr)
-    print(f"Agent card: http://localhost:{port}/.well-known/agent.json", file=sys.stderr)
-    print(f"Skills: {len(AGENT_CARD['skills'])}", file=sys.stderr)
+    ThreadingHTTPServer.daemon_threads = True
+    server = ThreadingHTTPServer((host, port), A2AHandler)
+    print(f"Ms-MASA A2A server on http://{host}:{port}/ "
+          f"(auth: {'bearer token' if token else 'none, loopback only'})", file=sys.stderr)
+    print(f"Agent card: http://{host}:{port}/.well-known/agent.json", file=sys.stderr)
 
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nShutting down.", file=sys.stderr)
+    finally:
         server.server_close()
 
 
@@ -337,19 +387,24 @@ def run_http_server(port: int = 9999):
 
 def main():
     import argparse
+    import logging
+    from ms_masa.security import AUTH_TOKEN_ENV, DEFAULT_HOST
 
-    parser = argparse.ArgumentParser(description="Ms-MASA A2A Server")
+    logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+    parser = argparse.ArgumentParser(
+        description="Ms-MASA A2A Server",
+        epilog=f"Binding a non-loopback host requires {AUTH_TOKEN_ENV} to be set.",
+    )
+    parser.add_argument("--host", default=DEFAULT_HOST, help=f"Bind address (default: {DEFAULT_HOST})")
     parser.add_argument("--port", type=int, default=9999, help="Port (default: 9999)")
     parser.add_argument("--card", action="store_true", help="Print agent card and exit")
     args = parser.parse_args()
 
     if args.card:
-        card = AGENT_CARD.copy()
-        card["url"] = f"http://localhost:{args.port}/"
-        print(json.dumps(card, indent=2))
+        print(json.dumps(build_agent_card(args.host, args.port, bool(os.getenv(AUTH_TOKEN_ENV))), indent=2))
         return
 
-    run_http_server(args.port)
+    run_http_server(args.port, args.host)
 
 
 if __name__ == "__main__":

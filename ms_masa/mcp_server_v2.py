@@ -5,12 +5,14 @@ Upgraded from raw JSON-RPC to the official MCP Python SDK (FastMCP).
 Supports stdio, SSE, and streamable HTTP transports out of the box.
 
 Install:
-    pip install "mcp[cli]"
+    pip install "mcp[cli]<2"
 
 Run:
     python -m ms_masa.mcp_server_v2                        # stdio (Claude Desktop/Code)
-    python -m ms_masa.mcp_server_v2 --http 8080            # HTTP (remote agents)
-    python -m ms_masa.mcp_server_v2 --sse 8080             # SSE (legacy clients)
+    python -m ms_masa.mcp_server_v2 --http 8080            # HTTP on 127.0.0.1
+    python -m ms_masa.mcp_server_v2 --sse 8080             # SSE on 127.0.0.1
+    MS_MASA_AUTH_TOKEN=... python -m ms_masa.mcp_server_v2 --http 8080 --host 0.0.0.0
+                                                           # remote: bearer token required
 
 Test with MCP Inspector:
     npx @modelcontextprotocol/inspector python -m ms_masa.mcp_server_v2
@@ -29,7 +31,7 @@ try:
     from mcp.server.fastmcp import FastMCP
 except ImportError:
     print(
-        "FastMCP requires the MCP SDK: pip install 'mcp[cli]'\n"
+        "FastMCP requires the MCP SDK v1: pip install 'mcp[cli]<2'\n"
         "Falling back to ms_masa.mcp_server (raw JSON-RPC).",
         file=sys.stderr,
     )
@@ -42,8 +44,7 @@ except ImportError:
 
 mcp = FastMCP(
     "ms-masa",
-    version="0.1.0",
-    description=(
+    instructions=(
         "Polymarket Agent Specialist - knowledge, live market data, "
         "analysis, signals, and agent builder for prediction markets."
     ),
@@ -179,23 +180,9 @@ def polymarket_ecosystem(section: str = "summary") -> str:
     Sections: repos, websocket, fees, resolution, neg_risk,
     clob_endpoints, order_structure, subgraphs, agent_prompts, summary, all
     """
-    from ms_masa.knowledge.ecosystem import EcosystemReference as eco
-    if section == "summary":
-        return eco.summary()
-    elif section == "all":
-        data = {
-            "repos": eco.REPOS,
-            "websocket": eco.WEBSOCKET,
-            "fees": eco.FEES,
-            "resolution": eco.RESOLUTION,
-            "neg_risk": eco.NEG_RISK,
-            "order_structure": eco.ORDER_STRUCTURE,
-            "subgraphs": eco.SUBGRAPHS,
-        }
-        return json.dumps(data, indent=2, default=str)
-    else:
-        data = getattr(eco, section.upper(), f"Unknown section: {section}")
-        return json.dumps(data, indent=2, default=str) if isinstance(data, dict) else str(data)
+    from ms_masa.mcp_server import ecosystem_section
+    data = ecosystem_section(section)
+    return data if isinstance(data, str) else json.dumps(data, indent=2, default=str)
 
 
 @mcp.tool()
@@ -241,29 +228,56 @@ def context_resource(agent_type: str) -> str:
 
 # ── Entry Point ────────────────────────────────────────────────────────
 
+def build_http_app(transport: str, host: str, port: int, token: str | None):
+    """Build the ASGI app for a network transport, wrapped in bearer auth if a token is set."""
+    from ms_masa.security import BearerAuthASGI, is_loopback
+
+    mcp.settings.host = host
+    mcp.settings.port = port
+    if not is_loopback(host):
+        # The SDK's DNS-rebinding guard only allows loopback Host headers by default;
+        # remote deployments are protected by the bearer token instead.
+        from mcp.server.transport_security import TransportSecuritySettings
+        mcp.settings.transport_security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
+
+    app = mcp.streamable_http_app() if transport == "streamable-http" else mcp.sse_app()
+    return BearerAuthASGI(app, token) if token else app
+
+
 def main():
     """CLI entry point for the FastMCP server."""
     import argparse
+    from ms_masa.security import AUTH_TOKEN_ENV, DEFAULT_HOST, enforce_bind_policy, load_auth_token
 
-    parser = argparse.ArgumentParser(description="Ms-MASA MCP Server v2 (FastMCP)")
+    parser = argparse.ArgumentParser(
+        description="Ms-MASA MCP Server v2 (FastMCP)",
+        epilog=f"Binding a non-loopback host requires {AUTH_TOKEN_ENV} to be set.",
+    )
     parser.add_argument("--http", type=int, metavar="PORT", help="Run with streamable HTTP on port")
     parser.add_argument("--sse", type=int, metavar="PORT", help="Run with SSE transport on port")
+    parser.add_argument("--host", default=DEFAULT_HOST, help=f"Bind address for HTTP/SSE (default: {DEFAULT_HOST})")
     parser.add_argument("--list-tools", action="store_true", help="List tools and exit")
     args = parser.parse_args()
 
     if args.list_tools:
-        # List all registered tools
-        tools = mcp._tool_manager.list_tools() if hasattr(mcp, "_tool_manager") else []
-        for t in tools:
-            print(f"  {t.name}: {t.description[:60]}...")
+        for t in mcp._tool_manager.list_tools():
+            print(f"  {t.name}: {(t.description or '').strip().splitlines()[0][:60]}")
         return
 
-    if args.http:
-        mcp.run(transport="streamable-http", host="0.0.0.0", port=args.http)
-    elif args.sse:
-        mcp.run(transport="sse", host="0.0.0.0", port=args.sse)
-    else:
+    if not (args.http or args.sse):
         mcp.run()  # stdio default
+        return
+
+    import uvicorn
+
+    token = load_auth_token()
+    enforce_bind_policy(args.host, token)
+    transport = "streamable-http" if args.http else "sse"
+    port = args.http or args.sse
+    app = build_http_app(transport, args.host, port, token)
+    print(f"Ms-MASA MCP ({transport}) on http://{args.host}:{port}/ "
+          f"(auth: {'bearer token' if token else 'none, loopback only'})", file=sys.stderr)
+    uvicorn.run(app, host=args.host, port=port, log_level="warning")
 
 
 if __name__ == "__main__":

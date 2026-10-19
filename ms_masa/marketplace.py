@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -157,13 +158,19 @@ class MarketplaceAdapter:
     - Any agent registry supporting JSON skill descriptors
     """
     manifest: AgentManifest = field(default_factory=lambda: MANIFEST)
-    usage_log: list[UsageRecord] = field(default_factory=list)
+    max_usage_records: int = 10_000
+    usage_log: deque[UsageRecord] = field(init=False)
+    # (caller_id, skill_name) -> [successful, failed]; keeps billing exact after log eviction
+    usage_totals: dict[tuple[str, str], list[int]] = field(default_factory=dict, init=False)
     rate_limits: dict[str, int] = field(default_factory=lambda: {
         "free": 1000,       # calls per hour
         "metered": 100,     # calls per hour
         "premium": 50,      # calls per hour
     })
     callers: dict[str, dict] = field(default_factory=dict)
+
+    def __post_init__(self):
+        self.usage_log = deque(maxlen=self.max_usage_records)
 
     def advertise(self) -> dict:
         """
@@ -231,6 +238,8 @@ class MarketplaceAdapter:
             **kwargs,
         )
         self.usage_log.append(record)
+        totals = self.usage_totals.setdefault((caller_id, skill_name), [0, 0])
+        totals[0 if record.success else 1] += 1
 
         caller = self.callers.get(caller_id)
         if caller:
@@ -239,20 +248,21 @@ class MarketplaceAdapter:
         return record
 
     def billing_summary(self, caller_id: Optional[str] = None) -> dict:
-        """Generate a billing summary."""
-        records = self.usage_log
-        if caller_id:
-            records = [r for r in records if r.caller_id == caller_id]
-
+        """Generate a billing summary from running totals."""
         by_skill: dict[str, int] = {}
-        for r in records:
-            by_skill[r.skill_name] = by_skill.get(r.skill_name, 0) + 1
+        successful = failed = 0
+        for (cid, skill), (ok, bad) in self.usage_totals.items():
+            if caller_id and cid != caller_id:
+                continue
+            by_skill[skill] = by_skill.get(skill, 0) + ok + bad
+            successful += ok
+            failed += bad
 
         return {
-            "total_calls": len(records),
+            "total_calls": successful + failed,
             "by_skill": by_skill,
-            "successful": sum(1 for r in records if r.success),
-            "failed": sum(1 for r in records if not r.success),
+            "successful": successful,
+            "failed": failed,
         }
 
     def well_known_agent_json(self) -> dict:

@@ -19,7 +19,10 @@ Protocol: https://docs.fetch.ai/uagents/
 from __future__ import annotations
 
 import json
+import os
+import secrets
 import sys
+from pathlib import Path
 
 # ── Message Models (can be used without uagents installed) ─────────────
 
@@ -51,13 +54,45 @@ MESSAGE_SCHEMAS = {
 }
 
 
-def create_agent(seed: str = "ms-masa-polymarket-agent", port: int = 8001):
+SEED_ENV = "MS_MASA_UAGENT_SEED"
+DEFAULT_SEED_PATH = Path.home() / ".ms_masa" / "uagent_seed"
+MIN_SEED_LENGTH = 32
+
+
+def resolve_seed(seed: str | None = None, seed_path: Path = DEFAULT_SEED_PATH) -> str:
+    """
+    Resolve the agent seed: explicit arg, then $MS_MASA_UAGENT_SEED, then a
+    per-install random seed persisted (mode 0600) at seed_path.
+
+    The seed deterministically derives the agent's on-chain identity, so it
+    must be secret and unique per deployment.
+    """
+    seed = seed or os.getenv(SEED_ENV)
+    if seed:
+        if len(seed) < MIN_SEED_LENGTH:
+            raise SystemExit(f"uAgent seed must be at least {MIN_SEED_LENGTH} characters")
+        return seed
+
+    if seed_path.exists():
+        return seed_path.read_text().strip()
+
+    seed_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    seed = secrets.token_hex(32)
+    fd = os.open(seed_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(seed)
+    print(f"Generated new uAgent seed at {seed_path}", file=sys.stderr)
+    return seed
+
+
+def create_agent(seed: str | None = None, port: int = 8001):
     """
     Create and configure the Ms-MASA uAgent.
 
     Returns the configured agent ready to run.
     Requires: pip install uagents
     """
+    seed = resolve_seed(seed)
     try:
         from uagents import Agent, Context, Model
     except ImportError:
@@ -66,6 +101,8 @@ def create_agent(seed: str = "ms-masa-polymarket-agent", port: int = 8001):
             file=sys.stderr,
         )
         sys.exit(1)
+
+    from ms_masa.security import public_error
 
     # ── Define message models ──────────────────────────────────────
 
@@ -128,7 +165,7 @@ def create_agent(seed: str = "ms-masa-polymarket-agent", port: int = 8001):
             ))
         except Exception as e:
             await ctx.send(sender, MasaResponse(
-                skill="explain", data=json.dumps({"error": str(e)}), success=False,
+                skill="explain", data=json.dumps({"error": public_error(e, "uagent explain")}), success=False,
             ))
 
     @agent.on_message(model=MarketQuery)
@@ -151,7 +188,7 @@ def create_agent(seed: str = "ms-masa-polymarket-agent", port: int = 8001):
             ))
         except Exception as e:
             await ctx.send(sender, MasaResponse(
-                skill="markets", data=json.dumps({"error": str(e)}), success=False,
+                skill="markets", data=json.dumps({"error": public_error(e, "uagent markets")}), success=False,
             ))
 
     @agent.on_message(model=AnalysisQuery)
@@ -166,7 +203,7 @@ def create_agent(seed: str = "ms-masa-polymarket-agent", port: int = 8001):
             ))
         except Exception as e:
             await ctx.send(sender, MasaResponse(
-                skill="analyze", data=json.dumps({"error": str(e)}), success=False,
+                skill="analyze", data=json.dumps({"error": public_error(e, "uagent analyze")}), success=False,
             ))
 
     @agent.on_message(model=SignalQuery)
@@ -183,7 +220,7 @@ def create_agent(seed: str = "ms-masa-polymarket-agent", port: int = 8001):
             ))
         except Exception as e:
             await ctx.send(sender, MasaResponse(
-                skill="signals", data=json.dumps({"error": str(e)}), success=False,
+                skill="signals", data=json.dumps({"error": public_error(e, "uagent signals")}), success=False,
             ))
 
     return agent
@@ -195,7 +232,10 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="Ms-MASA Fetch.ai uAgent")
-    parser.add_argument("--seed", default="ms-masa-polymarket-agent", help="Agent seed phrase")
+    parser.add_argument(
+        "--seed", default=None,
+        help=f"Agent seed (prefer ${SEED_ENV}; defaults to a generated seed in {DEFAULT_SEED_PATH})",
+    )
     parser.add_argument("--port", type=int, default=8001, help="Agent port")
     parser.add_argument("--schemas", action="store_true", help="Print message schemas and exit")
     args = parser.parse_args()
