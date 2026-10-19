@@ -133,3 +133,24 @@ class DashboardServerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StaticExportTests(unittest.TestCase):
+    def test_snapshot_covers_every_view(self):
+        from ms_masa.dashboard.server import build_snapshot
+        snap = build_snapshot(SampleSource(), limit=10)
+        self.assertEqual(len(snap["markets"]), 10)
+        self.assertEqual(set(snap["details"]), {m["id"] for m in snap["markets"]})
+        self.assertEqual(set(snap["explain"]), set(snap["topics"]))
+        self.assertEqual(snap["status"]["mode"], "sample")
+
+    def test_market_text_cannot_break_out_of_script(self):
+        from ms_masa.dashboard.server import build_snapshot, render_static
+        source = SampleSource()
+        evil = "</script><script>alert(1)</script>"
+        next(iter(source._markets.values())).question = evil
+        for standalone in (True, False):
+            html = render_static(build_snapshot(source, limit=40), standalone=standalone)
+            self.assertNotIn(evil, html)
+            self.assertEqual(html.count("</script>"), 2)
+        self.assertTrue(html.startswith("<title>"))

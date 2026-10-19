@@ -39,7 +39,8 @@ STATIC_FILES = {
 
 SECURITY_HEADERS = {
     "Content-Security-Policy": (
-        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+        "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; "
+        "font-src https://fonts.gstatic.com; img-src 'self' data:; "
         "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     ),
     "X-Content-Type-Options": "nosniff",
@@ -176,6 +177,63 @@ def create_server(source: DashboardSource, host: str = DEFAULT_HOST, port: int =
     return ThreadingHTTPServer((host, port), make_handler(source, token, host, port))
 
 
+def build_snapshot(source: DashboardSource, limit: int = 60) -> dict:
+    """Capture everything the UI needs so it can run without a server."""
+    from concurrent.futures import ThreadPoolExecutor
+    from datetime import datetime, timezone
+    from ms_masa.knowledge.polymarket_kb import PolymarketKB
+
+    markets = source.markets(sort="volume", limit=limit)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        details = dict(zip((m["id"] for m in markets), pool.map(lambda m: source.market_detail(m["id"]), markets)))
+    topics = PolymarketKB.topics()
+    return {
+        "status": {
+            "version": __version__,
+            "mode": "sample" if source.mode == "sample" else "snapshot",
+            "snapshot_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "auth_required": False,
+            "tags": list(TAGS),
+            "sorts": list(SORTS),
+        },
+        "markets": markets,
+        "details": details,
+        "signals": source.signals(limit=min(limit, 60)),
+        "topics": topics,
+        "explain": {t: PolymarketKB.lookup(t) for t in topics},
+    }
+
+
+def render_static(snapshot: dict, standalone: bool = True) -> str:
+    """Inline the dashboard and a snapshot into one HTML document (or a body fragment)."""
+    pkg = resources.files("ms_masa.dashboard") / "static"
+    page = (pkg / "index.html").read_text()
+    css = (pkg / "app.css").read_text()
+    js = (pkg / "app.js").read_text()
+    body = page[page.index("<body>") + len("<body>"):page.index("</body>")]
+    fonts = re.findall(r'\s*<link rel="(?:preconnect|stylesheet)" href="https://fonts[^>]*>', page)
+    # Escape "<" so no market text can close the script element early.
+    data = json.dumps(snapshot, default=str).replace("<", "\\u003c")
+    head = (
+        "<title>Ms-MASA Dashboard</title>\n"
+        '<meta name="claude:viewport-fit-sides" content="cover">\n'
+        + "".join(f.strip() + "\n" for f in fonts)
+        + f"<style>\n{css}\n</style>\n"
+    )
+    safe_js = js.replace("</script", "<\\/script")
+    scripts = (
+        f'<script type="application/json" id="ms-masa-snapshot">{data}</script>\n'
+        f"<script>\n{safe_js}\n</script>\n"
+    )
+    if not standalone:
+        return head + body + scripts
+    return (
+        '<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">\n'
+        + head + "</head>\n<body>" + body + scripts + "</body>\n</html>\n"
+    )
+
+
 def main(argv: list[str] | None = None):
     import argparse
     from ms_masa.security import AUTH_TOKEN_ENV
@@ -191,10 +249,22 @@ def main(argv: list[str] | None = None):
     parser.add_argument("--sample-data", action="store_true",
                         help="Serve built-in fictional sample markets instead of live Polymarket data")
     parser.add_argument("--open", action="store_true", help="Open the dashboard in a browser")
+    parser.add_argument("--export", metavar="FILE",
+                        help="Write a self-contained HTML snapshot (for static hosting) and exit")
     args = parser.parse_args(argv)
 
-    token = load_auth_token()
     source = SampleSource() if args.sample_data else LiveSource()
+    if args.export:
+        from pathlib import Path
+        try:
+            html = render_static(build_snapshot(source))
+        except UpstreamError as e:
+            raise SystemExit(f"Export failed: {e}. Use --sample-data to export offline.")
+        Path(args.export).write_text(html, encoding="utf-8")
+        print(f"Wrote {args.export} ({len(html) // 1024} KB, {source.mode} data)", file=sys.stderr)
+        return
+
+    token = load_auth_token()
     server = create_server(source, args.host, args.port, token)
     shown = "127.0.0.1" if args.host in ("0.0.0.0", "::") else args.host
     url = f"http://{shown}:{args.port}/"

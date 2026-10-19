@@ -82,6 +82,48 @@
     constructor(status, message) { super(message); this.status = status; }
   }
 
+  // A static export embeds a data snapshot and answers API calls locally.
+  const SNAP = (() => {
+    const node = document.getElementById("ms-masa-snapshot");
+    if (!node) return null;
+    try { return JSON.parse(node.textContent); } catch { return null; }
+  })();
+
+  const SORT_KEYS = {
+    volume: (m) => m.volume || 0,
+    liquidity: (m) => m.liquidity || 0,
+    certainty: (m) => Math.abs((m.yes_price ?? 0.5) - 0.5),
+    uncertainty: (m) => 1 - Math.abs((m.yes_price ?? 0.5) - 0.5),
+  };
+
+  function staticApi(path) {
+    const url = new URL(path, "http://snapshot.local");
+    const p = url.pathname, q = url.searchParams;
+    const tail = (prefix) => decodeURIComponent(p.slice(prefix.length));
+    if (p === "/api/status") return SNAP.status;
+    if (p === "/api/markets") {
+      const tag = q.get("tag"), query = (q.get("q") || "").toLowerCase();
+      const key = SORT_KEYS[q.get("sort")] || SORT_KEYS.volume;
+      return SNAP.markets
+        .filter((m) => (!tag || (m.tags || []).includes(tag)) && (!query || m.question.toLowerCase().includes(query)))
+        .sort((a, b) => key(b) - key(a))
+        .slice(0, Number(q.get("limit")) || 25);
+    }
+    if (p.startsWith("/api/markets/")) {
+      const d = SNAP.details[tail("/api/markets/")];
+      if (!d) throw new ApiError(404, "not found");
+      return d;
+    }
+    if (p === "/api/signals") return SNAP.signals;
+    if (p === "/api/topics") return SNAP.topics;
+    if (p.startsWith("/api/explain/")) {
+      const d = SNAP.explain[tail("/api/explain/")];
+      if (d === undefined) throw new ApiError(404, "not found");
+      return d;
+    }
+    throw new ApiError(404, "not found");
+  }
+
   const state = {
     status: null,
     token: store.get("sessionStorage", "ms-masa-token"),
@@ -96,6 +138,7 @@
   };
 
   async function api(path) {
+    if (SNAP) return staticApi(path);
     const headers = { Accept: "application/json" };
     if (state.token) headers.Authorization = "Bearer " + state.token;
     let res;
@@ -119,11 +162,19 @@
   }
 
   function sampleBanner() {
+    const when = state.status?.snapshot_at ? fmt.date(state.status.snapshot_at) : "";
+    if (state.status?.mode === "snapshot") {
+      return h("div", { class: "banner sample", role: "note" },
+        h("span", null, h("strong", { text: "Snapshot. " }),
+          `Polymarket data captured ${when}. Prices and order books are not live.`));
+    }
     return h("div", { class: "banner sample", role: "note" },
       h("span", null, h("strong", { text: "Sample data. " }),
-        "These markets are fictional and generated for demos. Restart without ",
-        h("code", { text: "--sample-data" }), " for live Polymarket data."));
+        "These markets are fictional and generated for demos.",
+        SNAP ? " Run the dashboard locally for live Polymarket data."
+          : [" Restart without ", h("code", { text: "--sample-data" }), " for live Polymarket data."]));
   }
+  const showsBanner = () => ["sample", "snapshot"].includes(state.status?.mode);
 
   function errorBanner(err, retry) {
     let msg = err.message;
@@ -138,10 +189,11 @@
   function renderBadge() {
     const badge = $("#mode-badge");
     if (!state.status) { badge.hidden = true; return; }
-    const sample = state.status.mode === "sample";
-    badge.className = "mode-badge" + (sample ? " sample" : "");
-    badge.replaceChildren(h("span", { class: "dot", "aria-hidden": "true" }), sample ? "Sample data" : "Live");
-    badge.title = sample ? "Fictional sample markets" : "Live Polymarket data";
+    const mode = state.status.mode;
+    const label = { sample: "Sample data", snapshot: "Snapshot" }[mode] || "Live";
+    badge.className = "mode-badge" + (mode === "live" ? "" : " sample");
+    badge.replaceChildren(h("span", { class: "dot", "aria-hidden": "true" }), label);
+    badge.title = { sample: "Fictional sample markets", snapshot: "Captured Polymarket data" }[mode] || "Live Polymarket data";
     badge.hidden = false;
   }
 
@@ -228,7 +280,8 @@
           h("th", { scope: "col", class: "col-optional", text: "Ends" }))),
         tbody));
 
-    view.append(h("div", { class: "toolbar" }, h("div", { class: "grow" }, search), tagSel, sortSel), stats, table);
+    const overview = h("div", { class: "overview", id: "market-overview" });
+    view.append(h("div", { class: "toolbar" }, h("div", { class: "grow" }, search), tagSel, sortSel), stats, overview, table);
     loadMarkets();
   }
 
@@ -243,8 +296,9 @@
     try {
       const markets = await api("/api/markets?" + params);
       if (seq !== state.requestSeq) return;
-      setBanner(state.status?.mode === "sample" ? sampleBanner() : null);
+      setBanner(showsBanner() ? sampleBanner() : null);
       renderMarketStats(markets);
+      renderOverview(markets);
       if (!markets.length) {
         tbody.replaceChildren(h("tr", null, h("td", { colspan: 6, class: "empty",
           text: state.q ? `No markets match “${state.q}”.` : "No markets in this category right now." })));
@@ -293,6 +347,108 @@
     return row;
   }
 
+  // Overview charts
+
+  let overviewObserver = null;
+
+  function renderOverview(markets) {
+    const box = $("#market-overview");
+    if (!box) return;
+    if (overviewObserver) { overviewObserver.disconnect(); overviewObserver = null; }
+    if (!markets.length) { box.replaceChildren(); return; }
+
+    const histCard = h("figure", { class: "card" });
+    histCard.style.margin = "0";
+    const tooltip = h("div", { class: "tooltip", hidden: true });
+    const svgEl = s("svg", { class: "hist-svg", role: "img" });
+    histCard.append(
+      h("h3", { class: "chart-title", text: "Where markets are priced" }),
+      h("p", { class: "chart-sub", text: "Shown markets by Yes price, in 10¢ bands" }),
+      svgEl, tooltip);
+
+    const buckets = Array.from({ length: 10 }, (_, i) => ({ lo: i / 10, hi: (i + 1) / 10, n: 0, vol: 0 }));
+    markets.forEach((m) => {
+      const b = buckets[Math.min(9, Math.floor((m.yes_price ?? 0.5) * 10))];
+      b.n += 1; b.vol += m.volume || 0;
+    });
+    const contested = buckets.slice(4, 6).reduce((a, b) => a + b.n, 0);
+    svgEl.setAttribute("aria-label", "Histogram of Yes prices: " +
+      buckets.map((b) => `${Math.round(b.lo * 100)} to ${Math.round(b.hi * 100)} cents, ${b.n}`).join("; ") +
+      `. ${contested} markets are priced between 40 and 60 cents.`);
+
+    const drawHist = () => {
+      const W = histCard.clientWidth - 32, H = 150;
+      if (W <= 0) return;
+      const m = { l: 28, r: 4, t: 14, b: 22 };
+      const maxN = Math.max(1, ...buckets.map((b) => b.n));
+      const yTop = maxN <= 4 ? maxN : Math.ceil(maxN / 2) * 2;
+      const bw = (W - m.l - m.r) / 10;
+      const X = (p) => m.l + p * 10 * bw;
+      const Y = (v) => H - m.b - (v / yTop) * (H - m.t - m.b);
+      svgEl.setAttribute("viewBox", `0 0 ${W} ${H}`);
+      svgEl.replaceChildren(
+        s("rect", { class: "zone", x: X(0.4), y: m.t - 12, width: X(0.6) - X(0.4), height: Y(0) - m.t + 12, rx: 4 }),
+        s("text", { class: "zone-label", x: (X(0.4) + X(0.6)) / 2, y: m.t - 2, "text-anchor": "middle", text: "Contested" }));
+      const ticks = yTop <= 4 ? yTop : 2;
+      for (let i = 0; i <= ticks; i++) {
+        const v = Math.round((yTop / ticks) * i);
+        svgEl.append(s("line", { class: i ? "grid" : "baseline", x1: m.l, x2: W - m.r, y1: Y(v), y2: Y(v) }));
+        svgEl.append(s("text", { class: "tick", x: m.l - 6, y: Y(v) + 4, "text-anchor": "end", text: v }));
+      }
+      [0, 0.25, 0.5, 0.75, 1].forEach((p) => svgEl.append(s("text", {
+        class: "tick", x: X(p), y: H - 6, "text-anchor": p === 0 ? "start" : p === 1 ? "end" : "middle", text: Math.round(p * 100) + "¢" })));
+      buckets.forEach((b, i) => {
+        const x = m.l + i * bw + 2, w = bw - 4;
+        if (b.n) {
+          const y = Y(b.n), r = Math.min(4, w / 2, Y(0) - y);
+          svgEl.append(s("path", { class: "bar",
+            d: `M${x},${Y(0)} V${y + r} Q${x},${y} ${x + r},${y} H${x + w - r} Q${x + w},${y} ${x + w},${y + r} V${Y(0)} Z` }));
+        }
+        const hit = s("rect", { x: m.l + i * bw, y: m.t, width: bw, height: Y(0) - m.t, fill: "transparent" });
+        const show = () => {
+          tooltip.replaceChildren(
+            h("div", { class: "tt-head", text: `${Math.round(b.lo * 100)}–${Math.round(b.hi * 100)}¢` }),
+            h("div", { class: "tt-row", text: `${b.n} market${b.n === 1 ? "" : "s"} · ${fmt.usd(b.vol)} volume` }));
+          tooltip.hidden = false;
+          const rect = svgEl.getBoundingClientRect(), card = histCard.getBoundingClientRect();
+          tooltip.style.left = Math.max(80, Math.min(card.width - 80, rect.left - card.left + (m.l + (i + 0.5) * bw) * rect.width / W)) + "px";
+          tooltip.style.top = (rect.top - card.top) + Y(b.n) * rect.height / H + "px";
+        };
+        hit.addEventListener("pointerenter", show);
+        hit.addEventListener("pointerdown", show);
+        hit.addEventListener("pointerleave", () => { tooltip.hidden = true; });
+        svgEl.append(hit);
+      });
+    };
+
+    const byCat = {};
+    markets.forEach((m) => {
+      const c = (m.tags || [])[0] || m.category || "other";
+      byCat[c] = byCat[c] || { vol: 0, n: 0 };
+      byCat[c].vol += m.volume || 0; byCat[c].n += 1;
+    });
+    const cats = Object.entries(byCat).sort((a, b) => b[1].vol - a[1].vol).slice(0, 6);
+    const maxVol = Math.max(1, ...cats.map(([, v]) => v.vol));
+    const catCard = h("figure", { class: "card" },
+      h("h3", { class: "chart-title", text: "Volume by category" }),
+      h("p", { class: "chart-sub", text: "Total traded volume of shown markets" }),
+      h("div", { class: "cat-bars", role: "list" }, cats.map(([name, v]) => {
+        const fill = h("span");
+        fill.style.width = (v.vol / maxVol) * 100 + "%";
+        return h("div", { class: "cat-row", role: "listitem",
+          title: `${name.replace("-", " ")}: ${v.n} market${v.n === 1 ? "" : "s"}, ${fmt.usd(v.vol)} volume` },
+          h("span", { class: "cat-name", text: name.replace("-", " ") }),
+          h("div", { class: "cat-track", "aria-hidden": "true" }, fill),
+          h("span", { class: "cat-val", text: fmt.usd(v.vol) }));
+      })));
+    catCard.style.margin = "0";
+
+    box.replaceChildren(histCard, catCard);
+    drawHist();
+    overviewObserver = new ResizeObserver(() => drawHist());
+    overviewObserver.observe(histCard);
+  }
+
   // Signals
 
   function renderSignals(view) {
@@ -315,7 +471,7 @@
     try {
       const rows = await api("/api/signals?limit=40");
       if (seq !== state.requestSeq) return;
-      setBanner(state.status?.mode === "sample" ? sampleBanner() : null);
+      setBanner(showsBanner() ? sampleBanner() : null);
 
       const counts = {};
       rows.forEach((r) => { counts[r.type] = (counts[r.type] || 0) + 1; });
@@ -701,6 +857,7 @@
   }
 
   document.querySelectorAll(".tab").forEach((b) => b.addEventListener("click", () => selectTab(b.dataset.tab)));
+  if (SNAP) $("#refresh-btn").hidden = true;
   $("#refresh-btn").addEventListener("click", () => {
     renderView();
     if (state.marketId) loadMarket(state.marketId);
