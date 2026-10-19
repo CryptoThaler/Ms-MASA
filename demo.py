@@ -206,7 +206,7 @@ def main():
     pause()
 
     info("Config for Claude Desktop / Claude Code:")
-    show_json({"mcpServers": {"ms-masa": {"command": "python", "args": ["-m", "ms_masa.mcp_server"]}}})
+    show_json({"mcpServers": {"ms-masa": {"command": "python", "args": ["-m", "ms_masa.mcp_server_v2"]}}})
     pause()
 
     # ── 9. A2A Server (Agent-to-Agent) ─────────────────────────────

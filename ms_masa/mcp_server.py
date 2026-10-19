@@ -6,9 +6,11 @@ AI models to external data/tools. This module turns Ms-MASA into an MCP
 server that any MCP-compatible client (Claude Desktop, Claude Code, Cursor,
 Windsurf, custom agents) can discover and call.
 
+This is the dependency-free fallback (stdio only). The default server is
+ms_masa.mcp_server_v2, which uses the official MCP SDK and also offers HTTP/SSE.
+
 Start the server:
-    python -m ms_masa.mcp_server               # stdio transport (default)
-    python -m ms_masa.mcp_server --sse 8080     # SSE transport on port
+    python -m ms_masa.mcp_server               # stdio, newline-delimited JSON-RPC
 
 Protocol: https://modelcontextprotocol.io/specification
 """
@@ -358,8 +360,8 @@ def handle_message(msg: dict) -> dict | None:
     msg_id = msg.get("id")
     params = msg.get("params", {})
 
-    # Notifications (no id) don't need responses
-    if msg_id is None and method == "notifications/initialized":
+    # Notifications (no id) never get responses
+    if "id" not in msg:
         return None
 
     if method == "initialize":
@@ -423,60 +425,38 @@ def _error(msg_id: Any, code: int, message: str) -> dict:
 # ── Transport: stdio ───────────────────────────────────────────────────
 
 MAX_MESSAGE_BYTES = 4 * 1024 * 1024
-MAX_HEADER_LINE_BYTES = 1024
 
 
 def _write_message(stdout, response: dict) -> None:
-    resp_bytes = json.dumps(response).encode("utf-8")
-    stdout.write(f"Content-Length: {len(resp_bytes)}\r\n\r\n".encode("utf-8"))
-    stdout.write(resp_bytes)
+    stdout.write(json.dumps(response).encode("utf-8") + b"\n")
     stdout.flush()
 
 
-def run_stdio():
-    """Run MCP server over stdio (Content-Length framed JSON-RPC)."""
+def run_stdio(stdin=None, stdout=None):
+    """Run MCP server over stdio: one JSON-RPC message per line, per the MCP spec."""
     import logging
     log = logging.getLogger("ms_masa.mcp")
 
-    stdin = sys.stdin.buffer
-    stdout = sys.stdout.buffer
+    stdin = stdin or sys.stdin.buffer
+    stdout = stdout or sys.stdout.buffer
 
     while True:
         try:
-            headers = {}
-            while True:
-                line = stdin.readline(MAX_HEADER_LINE_BYTES)
-                if not line:
-                    return  # EOF
-                line_str = line.decode("utf-8", errors="replace").strip()
-                if not line_str:
-                    break
-                if ":" in line_str:
-                    key, val = line_str.split(":", 1)
-                    headers[key.strip().lower()] = val.strip()
-
-            try:
-                content_length = int(headers.get("content-length", "0"))
-            except ValueError:
-                log.warning("Invalid Content-Length header: %r", headers.get("content-length"))
-                continue
-            if content_length <= 0:
-                continue
-            if content_length > MAX_MESSAGE_BYTES:
-                # Discard the oversized body in chunks so framing stays in sync.
-                log.warning("Dropping %d-byte message (limit %d)", content_length, MAX_MESSAGE_BYTES)
-                remaining = content_length
-                while remaining > 0:
-                    chunk = stdin.read(min(remaining, 65536))
-                    if not chunk:
-                        return
-                    remaining -= len(chunk)
+            line = stdin.readline(MAX_MESSAGE_BYTES + 1)
+            if not line:
+                return  # EOF
+            if len(line) > MAX_MESSAGE_BYTES:
+                # Drain the rest of the oversized line so the next message parses cleanly.
+                log.warning("Dropping message over %d bytes", MAX_MESSAGE_BYTES)
+                while line and not line.endswith(b"\n"):
+                    line = stdin.readline(65536)
                 _write_message(stdout, _error(None, -32600, "Message too large"))
                 continue
+            if not line.strip():
+                continue
 
-            body = stdin.read(content_length)
             try:
-                msg = json.loads(body.decode("utf-8"))
+                msg = json.loads(line.decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError) as e:
                 log.warning("Unparseable message: %s", e)
                 _write_message(stdout, _error(None, -32700, "Parse error"))
@@ -497,32 +477,37 @@ def run_stdio():
 
 # ── Entry Point ────────────────────────────────────────────────────────
 
-def main():
-    """CLI entry point for the MCP server."""
+def main(argv: list[str] | None = None):
+    """Run the dependency-free stdio MCP server."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="Ms-MASA MCP Server")
-    parser.add_argument(
-        "--sse", type=int, metavar="PORT",
-        help="Run with SSE transport on given port (default: stdio)",
-    )
+    parser = argparse.ArgumentParser(description="Ms-MASA MCP Server (dependency-free stdio)")
     parser.add_argument(
         "--list-tools", action="store_true",
         help="Print tool definitions and exit",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.list_tools:
         print(json.dumps(TOOLS, indent=2))
         return
 
-    if args.sse:
-        print("SSE transport is provided by ms_masa.mcp_server_v2 (--sse PORT).", file=sys.stderr)
-        sys.exit(1)
-
     import logging
     logging.basicConfig(level=logging.INFO, stream=sys.stderr)
     run_stdio()
+
+
+def serve(argv: list[str] | None = None):
+    """Start the FastMCP server, falling back to the stdio-only server without the MCP SDK."""
+    argv = sys.argv[1:] if argv is None else argv
+    try:
+        from ms_masa.mcp_server_v2 import main as fastmcp_main
+    except ImportError:
+        if any(a in ("--http", "--sse") or a.startswith(("--http=", "--sse=")) for a in argv):
+            raise SystemExit("HTTP/SSE transports need the MCP SDK: pip install 'ms-masa[server]'")
+        print("MCP SDK not installed; using the dependency-free stdio server.", file=sys.stderr)
+        return main(argv)
+    return fastmcp_main(argv)
 
 
 if __name__ == "__main__":

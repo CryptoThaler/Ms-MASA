@@ -30,7 +30,7 @@ One config line = instant distribution.
 ```
 pip install ms-masa
 # Add to claude_desktop_config.json:
-{"mcpServers": {"ms-masa": {"command": "python", "args": ["-m", "ms_masa.mcp_server"]}}}
+{"mcpServers": {"ms-masa": {"command": "python", "args": ["-m", "ms_masa.mcp_server_v2"]}}}
 ```
 
 **Revenue Model:** Freemium.
@@ -240,7 +240,7 @@ pip install ms-masa
 python -c "from ms_masa import MsMasaAgent; print(MsMasaAgent().explain('platform'))"
 
 # MCP (Claude Desktop/Code)
-# Add to config: {"mcpServers": {"ms-masa": {"command": "python", "args": ["-m", "ms_masa.mcp_server"]}}}
+# Add to config: {"mcpServers": {"ms-masa": {"command": "python", "args": ["-m", "ms_masa.mcp_server_v2"]}}}
 
 # A2A Server
 python -m ms_masa.a2a_server --port 9999

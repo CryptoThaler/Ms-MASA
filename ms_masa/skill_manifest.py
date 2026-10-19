@@ -310,7 +310,7 @@ class AgentManifest:
             "mcpServers": {
                 "ms-masa": {
                     "command": "python",
-                    "args": ["-m", "ms_masa.mcp_server"],
+                    "args": ["-m", "ms_masa.mcp_server_v2"],
                     "env": {},
                 },
             },

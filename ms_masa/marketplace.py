@@ -199,7 +199,7 @@ class MarketplaceAdapter:
             "pricing": self.manifest.pricing_summary(),
             "protocols": self.manifest.protocols,
             "endpoints": {
-                "mcp": "stdio://python -m ms_masa.mcp_server",
+                "mcp": "stdio://python -m ms_masa.mcp_server_v2",
                 "a2a": "/.well-known/agent.json",
                 "rest": "/api/v1/skills",
             },
@@ -398,9 +398,9 @@ INSTALLATION_GUIDE = {
     "mcp_claude_desktop": {
         "title": "Install into Claude Desktop (MCP)",
         "steps": [
-            "1. pip install ms-masa",
+            '1. pip install "ms-masa[server]"',
             '2. Add to ~/Library/Application Support/Claude/claude_desktop_config.json:',
-            '   {"mcpServers": {"ms-masa": {"command": "python", "args": ["-m", "ms_masa.mcp_server"]}}}',
+            '   {"mcpServers": {"ms-masa": {"command": "python", "args": ["-m", "ms_masa.mcp_server_v2"]}}}',
             "3. Restart Claude Desktop",
             "4. Ms-MASA tools appear in Claude's tool palette",
         ],
@@ -408,9 +408,9 @@ INSTALLATION_GUIDE = {
     "mcp_claude_code": {
         "title": "Install into Claude Code (MCP)",
         "steps": [
-            "1. pip install ms-masa",
-            "2. Add to .claude/settings.json or .mcp.json:",
-            '   {"mcpServers": {"ms-masa": {"command": "python", "args": ["-m", "ms_masa.mcp_server"]}}}',
+            '1. pip install "ms-masa[server]"',
+            "2. Add to .mcp.json (or run: claude mcp add ms-masa -- python -m ms_masa.mcp_server_v2):",
+            '   {"mcpServers": {"ms-masa": {"command": "python", "args": ["-m", "ms_masa.mcp_server_v2"]}}}',
             "3. Claude Code auto-discovers Ms-MASA tools",
         ],
     },

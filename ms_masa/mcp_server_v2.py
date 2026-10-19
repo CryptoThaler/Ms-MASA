@@ -1,11 +1,12 @@
 """
 Ms-MASA MCP Server v2 - FastMCP Implementation.
 
-Upgraded from raw JSON-RPC to the official MCP Python SDK (FastMCP).
-Supports stdio, SSE, and streamable HTTP transports out of the box.
+The default Ms-MASA MCP server, built on the official MCP Python SDK (FastMCP).
+Supports stdio, SSE, and streamable HTTP transports. Without the SDK installed,
+`python -m ms_masa.mcp_server_v2` falls back to the dependency-free stdio server.
 
 Install:
-    pip install "mcp[cli]<2"
+    pip install "ms-masa[server]"
 
 Run:
     python -m ms_masa.mcp_server_v2                        # stdio (Claude Desktop/Code)
@@ -30,13 +31,11 @@ from typing import Optional
 try:
     from mcp.server.fastmcp import FastMCP
 except ImportError:
-    print(
-        "FastMCP requires the MCP SDK v1: pip install 'mcp[cli]<2'\n"
-        "Falling back to ms_masa.mcp_server (raw JSON-RPC).",
-        file=sys.stderr,
-    )
-    from ms_masa.mcp_server import main
-    main()
+    if __name__ != "__main__":
+        raise
+    # Run directly without the SDK: serve stdio via the dependency-free server.
+    from ms_masa.mcp_server import serve
+    serve()
     sys.exit(0)
 
 
@@ -244,7 +243,7 @@ def build_http_app(transport: str, host: str, port: int, token: str | None):
     return BearerAuthASGI(app, token) if token else app
 
 
-def main():
+def main(argv: list[str] | None = None):
     """CLI entry point for the FastMCP server."""
     import argparse
     from ms_masa.security import AUTH_TOKEN_ENV, DEFAULT_HOST, enforce_bind_policy, load_auth_token
@@ -257,7 +256,7 @@ def main():
     parser.add_argument("--sse", type=int, metavar="PORT", help="Run with SSE transport on port")
     parser.add_argument("--host", default=DEFAULT_HOST, help=f"Bind address for HTTP/SSE (default: {DEFAULT_HOST})")
     parser.add_argument("--list-tools", action="store_true", help="List tools and exit")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.list_tools:
         for t in mcp._tool_manager.list_tools():

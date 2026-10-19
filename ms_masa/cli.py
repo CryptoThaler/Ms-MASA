@@ -90,6 +90,9 @@ def main(argv: list[str] | None = None):
     # serve (MCP server)
     p = sub.add_parser("serve", help="Start MCP server for agent integration")
     p.add_argument("--list-tools", action="store_true", help="List MCP tools and exit")
+    p.add_argument("--http", type=int, metavar="PORT", help="Serve streamable HTTP on PORT")
+    p.add_argument("--sse", type=int, metavar="PORT", help="Serve SSE on PORT")
+    p.add_argument("--host", help="Bind address for HTTP/SSE (default: 127.0.0.1)")
 
     # marketplace
     p = sub.add_parser("marketplace", help="Marketplace integration tools")
@@ -177,12 +180,18 @@ def main(argv: list[str] | None = None):
             print(f"  {name}: {desc}")
 
     elif args.command == "serve":
-        from ms_masa.mcp_server import main as mcp_main, TOOLS
+        from ms_masa.mcp_server import serve, TOOLS
         if args.list_tools:
             print(json.dumps(TOOLS, indent=2))
         else:
-            print("Starting Ms-MASA MCP server (stdio)...", file=__import__("sys").stderr)
-            mcp_main()
+            serve_args = []
+            if args.http:
+                serve_args += ["--http", str(args.http)]
+            if args.sse:
+                serve_args += ["--sse", str(args.sse)]
+            if args.host:
+                serve_args += ["--host", args.host]
+            serve(serve_args)
 
     elif args.command == "marketplace":
         from ms_masa.marketplace import MarketplaceAdapter, MANIFEST, SKILL_NFT_TEMPLATES, INSTALLATION_GUIDE

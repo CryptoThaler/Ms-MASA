@@ -221,3 +221,55 @@ class MarketplaceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class McpStdioCompatibilityTests(unittest.TestCase):
+    """Both servers must speak the MCP stdio transport that real clients use."""
+
+    def _list_tools_with_sdk_client(self, module: str) -> list[str]:
+        import asyncio
+        import sys
+        from mcp import ClientSession, StdioServerParameters
+        from mcp.client.stdio import stdio_client
+
+        async def run():
+            params = StdioServerParameters(command=sys.executable, args=["-m", module])
+            async with stdio_client(params) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    tools = await session.list_tools()
+                    result = await session.call_tool("polymarket_explain", {"topic": "fees"})
+                    self.assertFalse(result.isError)
+                    return [t.name for t in tools.tools]
+
+        return asyncio.run(asyncio.wait_for(run(), timeout=60))
+
+    def setUp(self):
+        try:
+            import mcp.client.stdio  # noqa: F401
+        except ImportError:
+            self.skipTest("mcp<2 not installed")
+
+    def test_fastmcp_server_works_with_sdk_client(self):
+        names = self._list_tools_with_sdk_client("ms_masa.mcp_server_v2")
+        self.assertIn("polymarket_scan_markets", names)
+
+    def test_fallback_server_works_with_sdk_client(self):
+        names = self._list_tools_with_sdk_client("ms_masa.mcp_server")
+        self.assertEqual(len(names), 10)
+
+    def test_fallback_stdio_framing(self):
+        import io
+        from ms_masa.mcp_server import MAX_MESSAGE_BYTES, run_stdio
+        lines = [
+            b"{not json\n",
+            b"x" * (MAX_MESSAGE_BYTES + 10) + b"\n",
+            json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}).encode() + b"\n",
+            json.dumps({"jsonrpc": "2.0", "id": 7, "method": "ping"}).encode() + b"\n",
+        ]
+        out = io.BytesIO()
+        with self.assertLogs("ms_masa.mcp", level="WARNING"):
+            run_stdio(io.BytesIO(b"".join(lines)), out)
+        replies = [json.loads(line) for line in out.getvalue().splitlines()]
+        self.assertEqual([r.get("error", {}).get("code") for r in replies], [-32700, -32600, None])
+        self.assertEqual(replies[2]["id"], 7)

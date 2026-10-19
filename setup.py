@@ -30,7 +30,7 @@ setup(
     entry_points={
         "console_scripts": [
             "ms-masa=ms_masa.cli:main",
-            "ms-masa-mcp=ms_masa.mcp_server:main",
+            "ms-masa-mcp=ms_masa.mcp_server:serve",
             "ms-masa-marketplace=ms_masa.marketplace:main",
         ],
     },
